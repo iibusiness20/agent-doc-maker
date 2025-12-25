@@ -1,5 +1,5 @@
 // Types for the parsed agent data
-// Adjust these interfaces when plugging in real Retell exports
+// Updated to handle real Retell AI exports
 
 export interface AgentCondition {
   condition: string;
@@ -20,8 +20,31 @@ export interface AgentSettings {
   temperature?: number;
   language?: string;
   voice?: string;
-  maxDuration?: number;
-  [key: string]: unknown; // Allow additional settings
+  voiceSpeed?: number;
+  voiceTemperature?: number;
+  responsiveness?: number;
+  interruptionSensitivity?: number;
+  ambientSound?: string;
+  maxCallDuration?: string;
+  reminderTrigger?: string;
+  endCallAfterSilence?: string;
+  sttMode?: string;
+  [key: string]: unknown;
+}
+
+export interface AgentTool {
+  id: string;
+  name: string;
+  type: string;
+  description: string;
+}
+
+export interface PostCallAnalysis {
+  name: string;
+  description: string;
+  type: string;
+  choices?: string[];
+  examples?: string[];
 }
 
 export interface ParsedAgent {
@@ -30,59 +53,155 @@ export interface ParsedAgent {
   description: string;
   settings: AgentSettings;
   nodes: AgentNode[];
+  tools: AgentTool[];
+  postCallAnalysis: PostCallAnalysis[];
+  globalPrompt: string;
   rawJson: unknown;
+}
+
+/**
+ * Formats milliseconds to human readable duration
+ */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(0)}s`;
+  return `${(ms / 60000).toFixed(1)} min`;
 }
 
 /**
  * Parses the raw JSON export from Retell AI into a structured ParsedAgent object.
  * 
  * CUSTOMIZATION NOTES:
- * - Adjust field mappings below based on actual Retell export schema
- * - The current mapping assumes a structure with agent.id, agent.name, agent.nodes, etc.
- * - Add new fields to the interfaces above as needed
+ * - This parser now handles real Retell AI conversation flow exports
+ * - The structure includes conversationFlow.nodes with instruction.text for prompts
+ * - Edges use destination_node_id and transition_condition.prompt
  */
 export function parseAgent(rawJson: string): ParsedAgent {
   const json = JSON.parse(rawJson);
   
-  // Extract agent-level fields
-  // CUSTOMIZE: Adjust these field names based on actual Retell schema
-  const id = json.id || json.agent_id || json.agentId || 'unknown';
-  const name = json.name || json.agent_name || json.agentName || 'Unnamed Agent';
-  const description = json.description || json.desc || json.purpose || '';
+  // Extract agent-level fields (Retell uses agent_id, agent_name)
+  const id = json.agent_id || json.id || json.agentId || 'unknown';
+  const name = json.agent_name || json.name || json.agentName || 'Unnamed Agent';
+  const description = json.description || json.version_title || json.desc || '';
   
-  // Extract settings
-  // CUSTOMIZE: Map additional settings fields as needed
-  const rawSettings = json.settings || json.config || json.configuration || {};
-  const settings: AgentSettings = {
-    model: rawSettings.model || rawSettings.llm_model || undefined,
-    temperature: rawSettings.temperature ?? undefined,
-    language: rawSettings.language || rawSettings.lang || undefined,
-    voice: rawSettings.voice || rawSettings.voice_id || undefined,
-    maxDuration: rawSettings.max_duration || rawSettings.maxDuration || undefined,
-  };
+  // Extract global prompt from conversationFlow
+  const globalPrompt = json.conversationFlow?.global_prompt || json.global_prompt || '';
   
-  // Clean up undefined values
-  Object.keys(settings).forEach(key => {
-    if (settings[key] === undefined) {
-      delete settings[key];
+  // Extract settings from various locations in Retell schema
+  const settings: AgentSettings = {};
+  
+  // Model settings from conversationFlow
+  if (json.conversationFlow?.model_choice?.model) {
+    settings.model = json.conversationFlow.model_choice.model;
+  }
+  if (json.conversationFlow?.model_temperature !== undefined) {
+    settings.temperature = json.conversationFlow.model_temperature;
+  }
+  
+  // Voice and language settings
+  if (json.language) settings.language = json.language;
+  if (json.voice_id) settings.voice = json.voice_id;
+  if (json.voice_speed) settings.voiceSpeed = json.voice_speed;
+  if (json.voice_temperature) settings.voiceTemperature = json.voice_temperature;
+  
+  // Interaction settings
+  if (json.responsiveness) settings.responsiveness = json.responsiveness;
+  if (json.interruption_sensitivity) settings.interruptionSensitivity = json.interruption_sensitivity;
+  if (json.ambient_sound) settings.ambientSound = json.ambient_sound;
+  if (json.stt_mode) settings.sttMode = json.stt_mode;
+  
+  // Duration settings
+  if (json.max_call_duration_ms) settings.maxCallDuration = formatDuration(json.max_call_duration_ms);
+  if (json.reminder_trigger_ms) settings.reminderTrigger = formatDuration(json.reminder_trigger_ms);
+  if (json.end_call_after_silence_ms) settings.endCallAfterSilence = formatDuration(json.end_call_after_silence_ms);
+  
+  // Legacy settings object
+  if (json.settings) {
+    Object.entries(json.settings).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) {
+        settings[key] = value;
+      }
+    });
+  }
+  
+  // Extract nodes from conversationFlow (Retell structure)
+  const rawNodes = json.conversationFlow?.nodes || json.nodes || json.flow?.nodes || json.steps || [];
+  
+  const nodes: AgentNode[] = rawNodes.map((node: any) => {
+    // Get prompt from instruction.text (Retell) or prompt field
+    const prompt = node.instruction?.text || node.prompt || node.instructions || node.content || '';
+    
+    // Get conditions from edges' transition_condition.prompt
+    const conditions: string[] = [];
+    if (node.else_edge?.transition_condition?.prompt) {
+      conditions.push(`Else: ${node.else_edge.transition_condition.prompt}`);
     }
-  });
-  
-  // Extract nodes
-  // CUSTOMIZE: Adjust node field mappings based on actual Retell schema
-  const rawNodes = json.nodes || json.flow?.nodes || json.steps || [];
-  const nodes: AgentNode[] = rawNodes.map((node: any) => ({
-    id: node.id || node.node_id || node.nodeId || `node_${Math.random().toString(36).substr(2, 9)}`,
-    name: node.name || node.label || node.title || 'Unnamed Node',
-    type: node.type || node.node_type || node.nodeType || 'unknown',
-    prompt: node.prompt || node.instructions || node.content || node.text || '',
-    conditions: Array.isArray(node.conditions) ? node.conditions : [],
-    next: Array.isArray(node.next) 
-      ? node.next.map((n: any) => ({
+    
+    // Get next nodes from edges array (Retell structure)
+    const next: AgentCondition[] = [];
+    
+    if (Array.isArray(node.edges)) {
+      node.edges.forEach((edge: any) => {
+        const condition = edge.transition_condition?.prompt || edge.condition || edge.label || 'default';
+        const targetNodeId = edge.destination_node_id || edge.targetNodeId || edge.target || edge.next_node || '';
+        if (targetNodeId) {
+          next.push({ condition, targetNodeId });
+        }
+      });
+    }
+    
+    // Handle else_edge (Retell branch nodes)
+    if (node.else_edge?.destination_node_id) {
+      next.push({
+        condition: 'Else',
+        targetNodeId: node.else_edge.destination_node_id,
+      });
+    }
+    
+    // Handle skip_response_edge (Retell special edges)
+    if (node.skip_response_edge?.destination_node_id) {
+      next.push({
+        condition: 'Skip Response',
+        targetNodeId: node.skip_response_edge.destination_node_id,
+      });
+    }
+    
+    // Legacy next array format
+    if (Array.isArray(node.next)) {
+      node.next.forEach((n: any) => {
+        next.push({
           condition: n.condition || n.label || n.trigger || 'default',
           targetNodeId: n.targetNodeId || n.target || n.next_node || n.nextNode || '',
-        }))
-      : [],
+        });
+      });
+    }
+    
+    return {
+      id: node.id || node.node_id || node.nodeId || `node_${Math.random().toString(36).substr(2, 9)}`,
+      name: node.name || node.label || node.title || 'Unnamed Node',
+      type: node.type || node.node_type || node.nodeType || 'unknown',
+      prompt,
+      conditions,
+      next,
+    };
+  });
+  
+  // Extract tools from conversationFlow
+  const rawTools = json.conversationFlow?.tools || json.tools || [];
+  const tools: AgentTool[] = rawTools.map((tool: any) => ({
+    id: tool.tool_id || tool.id || '',
+    name: tool.name || 'Unnamed Tool',
+    type: tool.type || 'unknown',
+    description: tool.description || '',
+  }));
+  
+  // Extract post-call analysis data
+  const postCallAnalysis: PostCallAnalysis[] = (json.post_call_analysis_data || []).map((item: any) => ({
+    name: item.name || '',
+    description: item.description || '',
+    type: item.type || 'string',
+    choices: item.choices,
+    examples: item.examples,
   }));
   
   return {
@@ -91,6 +210,9 @@ export function parseAgent(rawJson: string): ParsedAgent {
     description,
     settings,
     nodes,
+    tools,
+    postCallAnalysis,
+    globalPrompt,
     rawJson: json,
   };
 }
@@ -108,20 +230,34 @@ export function generateMermaid(parsed: ParsedAgent): string {
   
   // Add node definitions with sanitized names
   parsed.nodes.forEach((node) => {
-    const sanitizedName = node.name.replace(/[^\w\s]/g, '').substring(0, 30);
-    const nodeShape = node.type === 'start' ? `((${sanitizedName}))` 
-      : node.type === 'end' ? `([${sanitizedName}])` 
-      : `[${sanitizedName}]`;
-    lines.push(`  ${node.id}${nodeShape}`);
+    const sanitizedName = node.name.replace(/[^\w\s]/g, '').substring(0, 25);
+    const sanitizedId = node.id.replace(/-/g, '_');
+    
+    let nodeShape: string;
+    if (node.type === 'end') {
+      nodeShape = `([${sanitizedName}])`;
+    } else if (node.id.includes('start')) {
+      nodeShape = `((${sanitizedName}))`;
+    } else if (node.type === 'branch') {
+      nodeShape = `{${sanitizedName}}`;
+    } else if (node.type === 'function') {
+      nodeShape = `[/${sanitizedName}/]`;
+    } else {
+      nodeShape = `[${sanitizedName}]`;
+    }
+    lines.push(`  ${sanitizedId}${nodeShape}`);
   });
   
   // Add connections
   parsed.nodes.forEach((node) => {
+    const sanitizedSourceId = node.id.replace(/-/g, '_');
     node.next.forEach((connection) => {
-      const conditionLabel = connection.condition !== 'default' 
-        ? `|${connection.condition.replace(/[^\w\s]/g, '').substring(0, 20)}|` 
-        : '';
-      lines.push(`  ${node.id} -->${conditionLabel} ${connection.targetNodeId}`);
+      if (!connection.targetNodeId) return;
+      const sanitizedTargetId = connection.targetNodeId.replace(/-/g, '_');
+      const conditionLabel = connection.condition !== 'default' && connection.condition !== 'Else'
+        ? `|${connection.condition.replace(/[^\w\s]/g, '').substring(0, 15)}|` 
+        : connection.condition === 'Else' ? '|Else|' : '';
+      lines.push(`  ${sanitizedSourceId} -->${conditionLabel} ${sanitizedTargetId}`);
     });
   });
   
@@ -146,7 +282,7 @@ export function generateMarkdown(parsed: ParsedAgent): string {
   lines.push(`| **Agent ID** | \`${parsed.id}\` |`);
   lines.push(`| **Name** | ${parsed.name} |`);
   if (parsed.description) {
-    lines.push(`| **Description** | ${parsed.description} |`);
+    lines.push(`| **Version/Description** | ${parsed.description} |`);
   }
   
   // Settings
@@ -157,32 +293,41 @@ export function generateMarkdown(parsed: ParsedAgent): string {
     lines.push(`| Setting | Value |`);
     lines.push(`|---------|-------|`);
     Object.entries(parsed.settings).forEach(([key, value]) => {
-      lines.push(`| **${key}** | ${value} |`);
+      const formattedKey = key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
+      lines.push(`| **${formattedKey}** | ${value} |`);
     });
+  }
+  
+  // Global Prompt
+  if (parsed.globalPrompt) {
+    lines.push('');
+    lines.push('## Global Prompt');
+    lines.push('');
+    lines.push('```');
+    lines.push(parsed.globalPrompt);
+    lines.push('```');
   }
   
   lines.push('');
   
   // Nodes
-  lines.push('## Nodes and Prompts');
+  lines.push('## Conversation Flow Nodes');
   lines.push('');
   
   if (parsed.nodes.length === 0) {
     lines.push('*No nodes found in this agent.*');
   } else {
-    lines.push('| Node ID | Name | Type | Prompt | Conditions | Next Nodes |');
-    lines.push('|---------|------|------|--------|------------|------------|');
+    lines.push(`Total nodes: ${parsed.nodes.length}`);
+    lines.push('');
+    lines.push('| Node ID | Name | Type | Next Nodes |');
+    lines.push('|---------|------|------|------------|');
     
     parsed.nodes.forEach((node) => {
-      const promptPreview = node.prompt.length > 100 
-        ? node.prompt.substring(0, 100).replace(/\n/g, ' ') + '...' 
-        : node.prompt.replace(/\n/g, ' ');
-      const conditions = node.conditions.length > 0 ? node.conditions.join(', ') : '-';
       const nextNodes = node.next.length > 0 
-        ? node.next.map(n => `${n.condition} → ${n.targetNodeId}`).join('; ') 
-        : '-';
+        ? node.next.map(n => `${n.condition} → \`${n.targetNodeId}\``).join('; ') 
+        : '—';
       
-      lines.push(`| \`${node.id}\` | ${node.name} | ${node.type} | ${promptPreview} | ${conditions} | ${nextNodes} |`);
+      lines.push(`| \`${node.id}\` | ${node.name} | ${node.type} | ${nextNodes} |`);
     });
   }
   
@@ -196,14 +341,15 @@ export function generateMarkdown(parsed: ParsedAgent): string {
   lines.push('```');
   lines.push('');
   
-  // Detailed prompts
+  // Detailed node prompts
   if (parsed.nodes.some(n => n.prompt)) {
-    lines.push('## Detailed Prompts');
+    lines.push('## Node Prompts');
     lines.push('');
     
     parsed.nodes.forEach((node) => {
       if (node.prompt) {
-        lines.push(`### ${node.name} (\`${node.id}\`)`);
+        lines.push(`### ${node.name}`);
+        lines.push(`**ID:** \`${node.id}\` | **Type:** ${node.type}`);
         lines.push('');
         lines.push('```');
         lines.push(node.prompt);
@@ -211,6 +357,31 @@ export function generateMarkdown(parsed: ParsedAgent): string {
         lines.push('');
       }
     });
+  }
+  
+  // Tools
+  if (parsed.tools.length > 0) {
+    lines.push('## Tools');
+    lines.push('');
+    lines.push('| Tool ID | Name | Type | Description |');
+    lines.push('|---------|------|------|-------------|');
+    parsed.tools.forEach((tool) => {
+      lines.push(`| \`${tool.id}\` | ${tool.name} | ${tool.type} | ${tool.description} |`);
+    });
+    lines.push('');
+  }
+  
+  // Post-call analysis
+  if (parsed.postCallAnalysis.length > 0) {
+    lines.push('## Post-Call Analysis Fields');
+    lines.push('');
+    lines.push('| Field | Type | Description | Options/Examples |');
+    lines.push('|-------|------|-------------|------------------|');
+    parsed.postCallAnalysis.forEach((field) => {
+      const options = field.choices?.join(', ') || field.examples?.join(', ') || '—';
+      lines.push(`| ${field.name} | ${field.type} | ${field.description} | ${options} |`);
+    });
+    lines.push('');
   }
   
   // Raw JSON
@@ -230,18 +401,19 @@ export function generateMarkdown(parsed: ParsedAgent): string {
 
 /**
  * Generates HTML documentation from the parsed agent.
- * This is used for the preview and HTML export.
  */
 export function generateHtml(parsed: ParsedAgent, mermaidSvg?: string): string {
   const settingsRows = Object.entries(parsed.settings)
-    .map(([key, value]) => `<tr><td><strong>${key}</strong></td><td>${value}</td></tr>`)
+    .map(([key, value]) => {
+      const formattedKey = key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
+      return `<tr><td><strong>${formattedKey}</strong></td><td>${value}</td></tr>`;
+    })
     .join('');
   
   const nodesRows = parsed.nodes.map((node) => {
-    const promptPreview = node.prompt.length > 200 
-      ? node.prompt.substring(0, 200) + '...' 
+    const promptPreview = node.prompt.length > 150 
+      ? node.prompt.substring(0, 150) + '...' 
       : node.prompt;
-    const conditions = node.conditions.length > 0 ? node.conditions.join(', ') : '—';
     const nextNodes = node.next.length > 0 
       ? node.next.map(n => `<span class="next-node">${n.condition} → ${n.targetNodeId}</span>`).join('<br>') 
       : '—';
@@ -250,9 +422,8 @@ export function generateHtml(parsed: ParsedAgent, mermaidSvg?: string): string {
       <tr>
         <td><code>${node.id}</code></td>
         <td>${node.name}</td>
-        <td><span class="node-type">${node.type}</span></td>
+        <td><span class="node-type node-type-${node.type}">${node.type}</span></td>
         <td class="prompt-cell">${promptPreview.replace(/\n/g, '<br>')}</td>
-        <td>${conditions}</td>
         <td>${nextNodes}</td>
       </tr>
     `;
@@ -262,10 +433,65 @@ export function generateHtml(parsed: ParsedAgent, mermaidSvg?: string): string {
     .filter(n => n.prompt)
     .map((node) => `
       <div class="prompt-detail">
-        <h4>${node.name} <code>${node.id}</code></h4>
+        <h4>${node.name} <code>${node.id}</code> <span class="node-type node-type-${node.type}">${node.type}</span></h4>
         <pre>${node.prompt}</pre>
       </div>
     `).join('');
+  
+  const toolsSection = parsed.tools.length > 0 ? `
+    <h2>Tools</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Tool ID</th>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${parsed.tools.map(tool => `
+          <tr>
+            <td><code>${tool.id}</code></td>
+            <td>${tool.name}</td>
+            <td><span class="tool-type">${tool.type}</span></td>
+            <td>${tool.description}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  ` : '';
+  
+  const postCallSection = parsed.postCallAnalysis.length > 0 ? `
+    <h2>Post-Call Analysis Fields</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Field</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Options/Examples</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${parsed.postCallAnalysis.map(field => `
+          <tr>
+            <td><strong>${field.name}</strong></td>
+            <td><span class="field-type">${field.type}</span></td>
+            <td>${field.description}</td>
+            <td>${field.choices?.join(', ') || field.examples?.join(', ') || '—'}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  ` : '';
+  
+  const globalPromptSection = parsed.globalPrompt ? `
+    <h2>Global Prompt</h2>
+    <div class="global-prompt">
+      <pre>${parsed.globalPrompt}</pre>
+    </div>
+  ` : '';
   
   return `
 <!DOCTYPE html>
@@ -284,54 +510,67 @@ export function generateHtml(parsed: ParsedAgent, mermaidSvg?: string): string {
       line-height: 1.6;
       padding: 2rem;
     }
-    .container { max-width: 1200px; margin: 0 auto; }
+    .container { max-width: 1400px; margin: 0 auto; }
     h1 { font-size: 2rem; margin-bottom: 0.5rem; color: #1db9a0; }
     h2 { font-size: 1.5rem; margin: 2rem 0 1rem; color: #e7e9ea; border-bottom: 1px solid #2f3336; padding-bottom: 0.5rem; }
     h3 { font-size: 1.25rem; margin: 1.5rem 0 0.75rem; color: #8899a6; }
-    h4 { font-size: 1rem; margin-bottom: 0.5rem; }
+    h4 { font-size: 1rem; margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
     table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
     th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #2f3336; }
     th { background: #1a1f26; color: #8899a6; font-weight: 600; }
     tr:hover td { background: rgba(29, 185, 160, 0.05); }
-    code { background: #1a1f26; padding: 0.2rem 0.4rem; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 0.875rem; color: #1db9a0; }
-    pre { background: #1a1f26; padding: 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.875rem; white-space: pre-wrap; }
-    .node-type { background: #2f3336; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.75rem; }
-    .next-node { background: rgba(29, 185, 160, 0.15); padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.8rem; display: inline-block; margin: 0.1rem 0; }
-    .prompt-cell { max-width: 300px; font-size: 0.875rem; color: #8899a6; }
-    .prompt-detail { margin: 1rem 0; padding: 1rem; background: #1a1f26; border-radius: 8px; }
+    code { background: #1a1f26; padding: 0.2rem 0.4rem; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #1db9a0; word-break: break-all; }
+    pre { background: #1a1f26; padding: 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.8rem; white-space: pre-wrap; line-height: 1.5; }
+    .node-type { background: #2f3336; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.7rem; text-transform: uppercase; }
+    .node-type-conversation { background: rgba(29, 185, 160, 0.2); color: #1db9a0; }
+    .node-type-branch { background: rgba(255, 193, 7, 0.2); color: #ffc107; }
+    .node-type-function { background: rgba(138, 43, 226, 0.2); color: #ba68c8; }
+    .node-type-end { background: rgba(244, 67, 54, 0.2); color: #f44336; }
+    .tool-type, .field-type { background: #2f3336; padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.7rem; }
+    .next-node { background: rgba(29, 185, 160, 0.15); padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.7rem; display: inline-block; margin: 0.1rem 0; }
+    .prompt-cell { max-width: 400px; font-size: 0.8rem; color: #8899a6; }
+    .prompt-detail { margin: 1rem 0; padding: 1rem; background: #1a1f26; border-radius: 8px; border-left: 3px solid #1db9a0; }
     .prompt-detail h4 { color: #e7e9ea; }
     .prompt-detail code { margin-left: 0.5rem; }
     .prompt-detail pre { margin-top: 0.75rem; background: #0f1419; }
-    .mermaid-container { background: #1a1f26; padding: 2rem; border-radius: 8px; margin: 1rem 0; }
+    .global-prompt { background: #1a1f26; border-radius: 8px; padding: 1rem; border-left: 3px solid #ffc107; }
+    .global-prompt pre { background: transparent; padding: 0; }
+    .mermaid-container { background: #1a1f26; padding: 2rem; border-radius: 8px; margin: 1rem 0; overflow-x: auto; }
     .mermaid { background: transparent; }
     details { margin: 1rem 0; }
     summary { cursor: pointer; color: #1db9a0; font-weight: 500; }
-    details pre { margin-top: 1rem; }
+    details pre { margin-top: 1rem; max-height: 500px; overflow-y: auto; }
+    .badge { display: inline-block; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.75rem; margin-left: 0.5rem; }
+    .badge-version { background: rgba(29, 185, 160, 0.2); color: #1db9a0; }
     @media (max-width: 768px) {
       body { padding: 1rem; }
       table { display: block; overflow-x: auto; }
+      h1 { font-size: 1.5rem; }
     }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>${parsed.name}</h1>
+    <h1>${parsed.name} ${parsed.description ? `<span class="badge badge-version">${parsed.description}</span>` : ''}</h1>
     
     <h2>Agent Overview</h2>
     <table>
       <tr><td><strong>Agent ID</strong></td><td><code>${parsed.id}</code></td></tr>
       <tr><td><strong>Name</strong></td><td>${parsed.name}</td></tr>
-      ${parsed.description ? `<tr><td><strong>Description</strong></td><td>${parsed.description}</td></tr>` : ''}
+      ${parsed.description ? `<tr><td><strong>Version</strong></td><td>${parsed.description}</td></tr>` : ''}
     </table>
     
     ${Object.keys(parsed.settings).length > 0 ? `
-      <h3>Settings</h3>
+      <h3>Configuration</h3>
       <table>
         ${settingsRows}
       </table>
     ` : ''}
     
-    <h2>Nodes and Prompts</h2>
+    ${globalPromptSection}
+    
+    <h2>Conversation Flow</h2>
+    <p style="color: #8899a6; margin-bottom: 1rem;">Total nodes: ${parsed.nodes.length}</p>
     ${parsed.nodes.length > 0 ? `
       <table>
         <thead>
@@ -339,8 +578,7 @@ export function generateHtml(parsed: ParsedAgent, mermaidSvg?: string): string {
             <th>Node ID</th>
             <th>Name</th>
             <th>Type</th>
-            <th>Prompt</th>
-            <th>Conditions</th>
+            <th>Prompt Preview</th>
             <th>Next Nodes</th>
           </tr>
         </thead>
@@ -356,9 +594,13 @@ export function generateHtml(parsed: ParsedAgent, mermaidSvg?: string): string {
     </div>
     
     ${detailedPrompts ? `
-      <h2>Detailed Prompts</h2>
+      <h2>Detailed Node Prompts</h2>
       ${detailedPrompts}
     ` : ''}
+    
+    ${toolsSection}
+    
+    ${postCallSection}
     
     <h2>Raw JSON</h2>
     <details>
